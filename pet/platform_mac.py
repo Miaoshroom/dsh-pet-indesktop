@@ -238,6 +238,42 @@ def _mac_lock_overlay_window(view_id: int) -> bool:
         return False
 
 
+def _mac_order_input_window(view_id: int, owner_view_id: int) -> bool:
+    """让小输入窗紧邻绘制窗上方，避免它盖住本来挡在宠物前面的其它窗口。"""
+    if sys.platform != 'darwin':
+        return False
+    from PySide6.QtGui import QGuiApplication
+    if QGuiApplication.platformName() != 'cocoa':
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library('objc') or '/usr/lib/libobjc.A.dylib')
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        msg = objc.objc_msgSend
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        msg.restype = ctypes.c_void_p
+        window = msg(view_id, objc.sel_registerName(b'window'))
+        owner = msg(owner_view_id, objc.sel_registerName(b'window'))
+        if not window or not owner:
+            return False
+        msg.restype = ctypes.c_long
+        level = msg(owner, objc.sel_registerName(b'level'))
+        number = msg(owner, objc.sel_registerName(b'windowNumber'))
+        msg.restype = None
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+        msg(window, objc.sel_registerName(b'setLevel:'), level)
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long, ctypes.c_long]
+        msg(window, objc.sel_registerName(b'orderWindow:relativeTo:'), 1, number)
+        return True
+    except Exception:
+        logging.warning('macOS: 对齐输入窗层级失败', exc_info=True)
+        return False
+
+
 def _mac_set_dock_icon_visible(visible: bool) -> None:
     """Switch the macOS application policy without restarting the pet.
 

@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """非 Windows 逐像素输入穿透 —— Qt 属性 + 原生输入穿透标志的轮询实现。
 
+macOS Cocoa 合成窗当前采用输入分离：全屏绘制层始终穿透，
+``macos_input_window.MacOSInputWindow`` 只在宠物附近接收并转发输入。
+沿用本模块的像素判定和轮询，不再因光标命中宠物而恢复整屏输入。
+其它平台、旧窗口和 offscreen 测试继续使用下述原路径。
+
 背景（发布阻断级）：新架构默认拓扑是全屏 overlay（``pet/overlay_window.py``：
 一个全屏透明窗承载全部 sprite）。逐像素穿透此前只有 Windows 实现
 （``pet/platform_win.py`` 的 ``WindowsPerPixelInputController``：WS_EX_TRANSPARENT
@@ -45,8 +50,8 @@
    缓存，直接对当前目标态做一次**先清再立**的真重放；
 3. 之后轮询表按光标位置 10/50ms 接管常规收敛。
 
-未在本机验证（诚实登记）：X11/macOS 的真实跨应用穿透行为本机（Windows）无法
-执行。已知边界：X11 缺 XFixes 扩展时 ``QXcbWindow::setTransparentForMouseEvents``
+本机已验证 Cocoa 的全屏穿透、小窗口命中及显示/重建恢复；台前调度实际动画仍需
+用户确认。X11 跨应用穿透本轮未实测：缺 XFixes 时 ``QXcbWindow::setTransparentForMouseEvents``
 会静默早退（qxcbwindow.cpp:1279-1281）；Wayland 原生会话（非 XWayland）下
 Qt 是否处理该标志未验证。见交付报告「未实测项」。
 """
@@ -58,7 +63,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QGuiApplication
 
 if TYPE_CHECKING:
     from .overlay_window import OverlayWindow
@@ -68,6 +73,12 @@ _TRANSPARENT_FLAG = Qt.WindowType.WindowTransparentForInput
 
 #: macOS 专用落窗短路开关（issue #314；模块级常量便于测试替换）。
 _IS_MACOS = sys.platform == "darwin"
+
+
+def _use_macos_input_window(window) -> bool:
+    """仅真实 Cocoa 合成窗启用输入分离；其它平台和旧窗口沿用既有路径。"""
+    return (_IS_MACOS and QGuiApplication.platformName() == "cocoa"
+            and hasattr(window, "sprites"))
 
 
 def passthrough_decision(*, mouse_through: bool, press_active: bool,
@@ -119,13 +130,21 @@ class QtPerPixelInputController:
     _applied_win_id: int | None = None
     #: 上一次真写的**目标态**（macOS 专用短路，见 ``_apply_through``）。
     _applied_state: bool | None = None
+    _input_window = None
+    _input_suspended = False
 
     def __init__(self, window: "OverlayWindow") -> None:
         self._window = window
+        if _use_macos_input_window(window):
+            from .macos_input_window import MacOSInputWindow
+
+            self._input_window = MacOSInputWindow(window)
         self._timer = QTimer(window)
         self._timer.setInterval(self.NORMAL_POLL_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
+        if self._input_window is not None:
+            self.refresh()  # 首次显示即保证全屏绘制层穿透，不等待第一拍轮询。
 
     # ---------------------------------------------------------------- 判定（协议入口）
     def should_click_through(self, global_pos: QPoint) -> bool:
@@ -210,6 +229,12 @@ class QtPerPixelInputController:
         「每 N 次 refresh 才校正一次」的低频窗口：属性被外部改写会在一个 tick
         内被收敛回来。
         """
+        if self._input_window is not None:
+            if self._input_suspended:
+                self._input_window.hide()
+            else:
+                self._input_window.sync(enabled)
+            enabled = True  # 原生全屏窗口始终穿透，交互只由小窗口接收。
         win = self._window
         handle = win.windowHandle()
         win_id = self._handle_win_id(win, handle)
@@ -234,7 +259,9 @@ class QtPerPixelInputController:
                        or bool(handle.flags() & _TRANSPARENT_FLAG) == enabled)
             if attribute_ok and flag_ok and not recreated:
                 return False
-        pair = force or recreated
+        # Cocoa 输入分离后，全屏层连对账时也不能短暂恢复输入；新原生窗口
+        # 会从 Qt 的穿透标志创建。X11 等原路径仍需要先清再立来修复输入形状。
+        pair = (force or recreated) and self._input_window is None
         if pair:
             # 先清：同名写入会被 QWidget::setAttribute / QWindow::setFlag 早退吃掉，
             # 而平台侧缓存可能仍认为「已是目标态」。
@@ -260,6 +287,7 @@ class QtPerPixelInputController:
         点击。所以先作废缓存、同步 refresh 一次，再开表；最后排一次延迟对账兜住
         「平台显示阶段又重建了原生窗口」（Major：X11 置顶标志的重建晚于 showEvent）。
         """
+        self._input_suspended = False
         self._applied_win_id = None
         self._applied_state = None
         self.refresh()
@@ -306,7 +334,11 @@ class QtPerPixelInputController:
         refresh 必须重新读一遍真实状态。清穿透态是让「未显示」与「未穿透」对齐：
         隐藏窗口留着穿透位没有意义，重新显示时由 ``resume``（同步收敛）与延迟对账
         重新建立正确状态；用户手动穿透开关（``mouse_through``）是用户意愿，保留。
+        Cocoa 输入分离模式只隐藏小输入窗，全屏层在停表期间也保持穿透。
         """
+        self._input_suspended = True
+        if self._input_window is not None:
+            self._input_window.hide()
         self._timer.stop()
         self._applied_win_id = None
         self._applied_state = None
