@@ -64,13 +64,13 @@ def test_macos_unit_dpr_screens_use_separate_windows(
         assert len(shell.hosts()) == expected
         if expected == 2:
             for screen in (main, left):
-                assert shell.host_for_screen(screen).overlay.geometry() == screen.availableGeometry()
+                assert shell.host_for_screen(screen).overlay.geometry() == screen.geometry()
             for screen in (left, main):
                 assert shell.move_sprite_to_screen(shell.sprite, screen)
                 host = shell.host_for_sprite(shell.sprite)
                 assert host.screen is screen
                 body = shell.sprite.body_rect().translated(host.overlay.geometry().topLeft())
-                assert QRectF(screen.availableGeometry()).contains(body)
+                assert QRectF(screen.geometry()).contains(body)
             shell.sprite.set_pos(QPointF(150, 500))
             for screen, step in ((left, -40), (main, 40)):
                 overlay = shell.host_for_sprite(shell.sprite).overlay

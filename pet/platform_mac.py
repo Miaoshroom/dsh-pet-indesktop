@@ -200,6 +200,44 @@ def _mac_set_window_all_spaces(view_id: int) -> bool:
         return False
 
 
+def _mac_lock_overlay_window(view_id: int) -> bool:
+    """关闭原生拖动和边缘缩放，不进入独立全屏桌面。"""
+    if sys.platform != 'darwin':
+        return False
+    from PySide6.QtGui import QGuiApplication
+    if QGuiApplication.platformName() != 'cocoa':
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library('objc') or '/usr/lib/libobjc.A.dylib')
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        msg = objc.objc_msgSend
+        msg.restype = ctypes.c_void_p
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        window = msg(view_id, objc.sel_registerName(b'window'))
+        if not window:
+            return False
+        msg.restype = None
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+        for selector in (b'setMovable:', b'setMovableByWindowBackground:'):
+            msg(window, objc.sel_registerName(selector), False)
+        msg.restype = ctypes.c_ulong
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        style = msg(window, objc.sel_registerName(b'styleMask'))
+        if style & 8:  # 原生窗口的可缩放样式位（NSWindowStyleMaskResizable）
+            msg.restype = None
+            msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+            msg(window, objc.sel_registerName(b'setStyleMask:'), style & ~8)
+        return True
+    except Exception:
+        logging.warning('macOS: 锁定合成窗失败', exc_info=True)
+        return False
+
+
 def _mac_set_dock_icon_visible(visible: bool) -> None:
     """Switch the macOS application policy without restarting the pet.
 

@@ -22,6 +22,11 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+
+# 本测试族验证工作区变化与任务栏避让；macOS 整屏几何及 Dock 变化
+# 由 test_macos_overlay_bounds.py 单独覆盖。
+pytestmark = pytest.mark.usefixtures("non_macos_overlay_topology")
+
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 

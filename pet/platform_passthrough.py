@@ -244,6 +244,11 @@ class QtPerPixelInputController:
             if pair:
                 handle.setFlag(_TRANSPARENT_FLAG, False)
             handle.setFlag(_TRANSPARENT_FLAG, enabled)
+            # Cocoa 在此重算窗口样式，固定尺寸的合成窗也可能重新允许拉边缩放；
+            # 因此在实际切换穿透时，重新应用该窗口的原生几何限制。
+            geometry_policy = getattr(win, "_apply_native_geometry_policy", None)
+            if sys.platform == "darwin" and callable(geometry_policy):
+                geometry_policy()
         self._applied_win_id = win_id
         self._applied_state = enabled
         return True

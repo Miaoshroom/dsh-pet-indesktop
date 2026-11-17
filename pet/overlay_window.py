@@ -40,7 +40,7 @@ from __future__ import annotations
 import sys
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, Qt
 from PySide6.QtGui import QCursor, QPainter, QRegion, QScreen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -48,6 +48,7 @@ from . import catalog
 from . import overlay_peripherals
 from .platform_mac import (
     _keep_macos_tool_window_visible,
+    _mac_lock_overlay_window,
     _mac_no_window_shadow_flag,
     _mac_set_hides_on_deactivate,
     _mac_set_window_all_spaces,
@@ -100,14 +101,13 @@ class OverlayWindow(QWidget):
         # 单合成窗新架构落成时漏了它。只设 native 属性、不动 flags，不会重建原生窗口。
         _keep_macos_tool_window_visible(self)
         # 合成窗：默认主屏，调用方（壳的宿主）注入该窗所属的 QScreen。窗口矩形默认
-        # 取该屏几何；壳注入 ``_desktop_bounds``（各屏可用工作区的并集）后由它接管
-        # ——并集要排除每屏任务栏，按窗口矩形自判全屏的第三方软件（壁纸引擎、
-        # 任务栏监控）才不会把桌宠当成全屏应用。
+        # 取该屏几何；壳注入 ``_desktop_bounds`` 后由它接管。macOS 覆盖含 Dock
+        # 的整屏；其它平台排除任务栏，避免第三方软件把桌宠判作全屏应用。
         self._screen = screen or QApplication.primaryScreen()
         self._desktop_bounds = None
         # 逐只 DPR 取数（sprite → 它所在那块屏）；壳注入，未注入 = 本窗屏
         self._screen_of_sprite = None
-        self.setGeometry(self._desktop_rect())
+        self.set_desktop_geometry(self._desktop_rect())
 
         self.sprites: list = []
         self._mouse_grab = None
@@ -181,7 +181,7 @@ class OverlayWindow(QWidget):
         return self._screen
 
     def _desktop_rect(self) -> QRect:
-        """窗口矩形：壳注入的 ``_desktop_bounds``（各屏可用工作区并集）优先，
+        """窗口矩形：壳注入的 ``_desktop_bounds``（macOS 含 Dock）优先，
         未注入（裸 overlay / demo 装配）= 本窗那块屏的几何。"""
         provider = self._desktop_bounds
         if callable(provider):
@@ -189,6 +189,22 @@ class OverlayWindow(QWidget):
             if rect is not None and not rect.isEmpty():
                 return QRect(rect)
         return QRect(self._screen.geometry())
+
+    def set_desktop_geometry(self, rect: QRect) -> None:
+        """设置活动区域；macOS 窗口尺寸只允许由程序调整。"""
+        if sys.platform == "darwin":
+            self.setFixedSize(rect.size())
+        self.setGeometry(rect)
+
+    def _restore_macos_desktop(self) -> None:
+        if not self._alive() or not self.isVisible():
+            return
+        self.set_desktop_geometry(self._desktop_rect())
+        self._apply_native_geometry_policy()
+
+    def _apply_native_geometry_policy(self) -> None:
+        """输入穿透切换也会重写 Cocoa 样式，因此需要重新应用锁定。"""
+        _mac_lock_overlay_window(int(self.winId()))
 
     @property
     def tick_driver(self) -> TickDriver:
@@ -255,6 +271,11 @@ class OverlayWindow(QWidget):
         # 才指向就绪的 NSView，构造期拿不到。非 cocoa 平台本函数是安全 no-op。
         _mac_set_hides_on_deactivate(int(self.winId()))
         _mac_set_window_all_spaces(int(self.winId()))
+        if sys.platform == "darwin":
+            self._restore_macos_desktop()
+            # Cocoa 首次显示时可能把窗口收进工作区，显示后再对账一次；
+            # 置顶切换等原生窗口重建也走同一条恢复路径。
+            QTimer.singleShot(0, self._restore_macos_desktop)
         self._refresh_tick_interval()  # V-6：显示时重读刷新率（电池 DRR）
         self._feed_dpr()               # V-11：DPR 由 overlay 统一喂
         self._arm_dpr_change_watch()   # D2/P1：屏 DPR 变化 → 重喂 + 重建
@@ -545,8 +566,7 @@ class OverlayWindow(QWidget):
         if not self._alive():
             return  # 屏信号可能晚于窗口销毁（见 _alive）
         geo = self._desktop_rect()
-        if self.geometry() != geo:
-            self.setGeometry(geo)
+        self.set_desktop_geometry(geo)
         self._refresh_tick_interval()
         self._feed_dpr()
         self.update()

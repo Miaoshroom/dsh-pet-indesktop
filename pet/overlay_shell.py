@@ -743,6 +743,11 @@ def _screen_name(screen) -> str:
         return "?"
 
 
+def _screen_area(screen) -> QRect:
+    """macOS 桌宠可进入 Dock 和菜单栏区域；其它平台继续避让任务栏。"""
+    return QRect(screen.geometry() if _IS_MACOS else screen.availableGeometry())
+
+
 def mixed_dpr_notice(ratios, *, multi_window: bool) -> str:
     """混合缩放的一句话说明（一次启动只打一次）。
 
@@ -1462,7 +1467,7 @@ class OverlayShell(QObject):
     def _create_host(self, screen):
         """建唯一宿主（合成窗 + 一份控制器组 + 活动区），并接线到壳。
 
-        窗口矩形取各屏**可用工作区**的并集包围矩形（见 ``_desktop_bounds``）；
+        窗口矩形取各屏活动区的并集包围矩形（macOS 含 Dock，见 ``_desktop_bounds``）；
         ``screen`` 只是"家那块屏"的记录（关闭跨屏时它决定唯一活动区）。
         """
         if self._mixed_dpr() and not self._mixed_dpr_logged:
@@ -1483,7 +1488,7 @@ class OverlayShell(QObject):
         overlay._desktop_bounds = (  # noqa: SLF001 - 同模块协作面
             lambda screen=screen: self._host_window_rect(screen))
         overlay._screen_of_sprite = self._screen_of_sprite  # noqa: SLF001
-        overlay.setGeometry(desktop)
+        overlay.set_desktop_geometry(desktop)
         host = ScreenHost(screen, overlay, bounds)
         self._hosts.append(host)
         # 活动区要在宿主进表之后算：家那块屏（关闭跨屏时唯一活动区）从宿主读
@@ -1714,17 +1719,17 @@ class OverlayShell(QObject):
                        (phys.y() - p_dst.y()) / d_dst)
 
     def _virtual_work_area(self) -> QRect:
-        """所有屏可用工作区的并集（全局逻辑坐标）——多窗拖拽的宽松域用。"""
+        """所有屏活动区的并集（全局逻辑坐标）——多窗拖拽的宽松域用。"""
         rect = None
         for screen in self._screens():
-            avail = QRect(screen.availableGeometry())
+            avail = _screen_area(screen)
             rect = avail if rect is None else rect.united(avail)
         return rect if rect is not None else QRect()
 
     def _host_window_rect(self, screen) -> QRect:
-        """该宿主窗口的全局矩形（多窗模式 = 该屏可用区）。"""
+        """该宿主窗口的全局矩形（多窗模式 = 该屏活动区）。"""
         if self._active_multi() and screen is not None:
-            return QRect(screen.availableGeometry())
+            return _screen_area(screen)
         return self._desktop_bounds(screen)
 
     def _probe_bounds(self, host) -> QRect:
@@ -1751,9 +1756,10 @@ class OverlayShell(QObject):
         return self._activity_rects()
 
     def _desktop_bounds(self, home=None) -> QRect:
-        """窗口全局矩形 = 各屏**可用工作区**的并集包围矩形。
+        """窗口全局矩形 = 各屏活动区的并集包围矩形。
 
-        用 availableGeometry 而不是 virtualGeometry：后者含每屏任务栏，窗口铺满
+        macOS 用整屏 geometry，包含菜单栏与 Dock；其它平台仍用 availableGeometry：
+        virtualGeometry 含每屏任务栏，窗口铺满
         它就是以"全屏矩形"存在，Wallpaper Engine / TrafficMonitor 这类按窗口矩形
         自判全屏的软件会把桌宠当成全屏应用（WE 暂停壁纸、TM 隐藏悬浮窗，#302）。
 
@@ -1766,21 +1772,21 @@ class OverlayShell(QObject):
         # 铺整张虚拟桌面会把 Qt 那个混合坐标系（负原点屏的原生 x + 逻辑宽高，
         # 见 _scaled_multi_screen）当成真实桌面，宠被画到屏外（issue #310）。
         if home is not None and self._scaled_multi_screen() and not self._multi_window():
-            return QRect(home.availableGeometry())
+            return _screen_area(home)
         rect = None
         for screen in self._screens():
-            avail = QRect(screen.availableGeometry())
+            avail = _screen_area(screen)
             rect = avail if rect is None else rect.united(avail)
         return rect if rect is not None else QRect()
 
     def _screen_rect(self, screen, *, multi=None) -> QRect:
-        """某屏可用工作区在窗口局部坐标里的矩形（活动区的一块；比例/落位同源）。
+        """某屏活动区在窗口局部坐标里的矩形（比例/落位同源，macOS 含 Dock）。
 
         ``multi``：**几何事务**里要按"实际有几张窗"传，不能让它自己读判定——
         拓扑对齐失败时（某块屏的宿主建不起来）判定说多窗、实际只有一张窗，两套
         坐标系混用会把家屏的活动区写成窗口原点，(位置直接算坏)。
         """
-        avail = QRect(screen.availableGeometry())
+        avail = _screen_area(screen)
         if self._active_multi() if multi is None else multi:
             return QRect(0, 0, avail.width(), avail.height())
         desktop = self._desktop_bounds()
@@ -1809,7 +1815,7 @@ class OverlayShell(QObject):
         x, y = int(point.x()), int(point.y())
         screens = self._screens()
         for screen in screens:
-            if screen.availableGeometry().contains(x, y):
+            if _screen_area(screen).contains(x, y):
                 return screen
         if not screens:
             return None
@@ -1818,7 +1824,7 @@ class OverlayShell(QObject):
     @staticmethod
     def _center_distance(screen, x: int, y: int) -> float:
         """点到某屏可用区中心距离的平方（不在任何屏上时的兜底取屏）。"""
-        avail = screen.availableGeometry()
+        avail = _screen_area(screen)
         cx = avail.x() + avail.width() / 2.0
         cy = avail.y() + avail.height() / 2.0
         return (cx - x) ** 2 + (cy - y) ** 2
@@ -7235,7 +7241,7 @@ class OverlayShell(QObject):
         if screen is None or host is None:
             return QRect()
         origin = host.overlay.geometry().topLeft()
-        return QRect(screen.availableGeometry()).translated(-origin.x(), -origin.y())
+        return _screen_area(screen).translated(-origin.x(), -origin.y())
 
     def _screen_rect_in_host(self, screen, host) -> QRect:
         """某块屏在**指定宿主窗**坐标系里的矩形。
@@ -7583,7 +7589,7 @@ class OverlayShell(QObject):
             for each in list(self._hosts):
                 self._end_drag(each)
             for each in list(self._hosts):
-                rect = QRect(each.screen.availableGeometry())
+                rect = _screen_area(each.screen)
                 if rect.isEmpty():
                     continue
                 # 比例必须在换域**之前**取：``set_bounds`` 会就地按新域钳一次，
@@ -7592,7 +7598,7 @@ class OverlayShell(QObject):
                 plan = [(sprite, *self._body_ratio(sprite, old_bounds))
                         for sprite in list(each.overlay.sprites)]
                 old_origin = each.overlay.geometry().topLeft()
-                each.overlay.setGeometry(rect)
+                each.overlay.set_desktop_geometry(rect)
                 each.set_bounds(QRect(0, 0, rect.width(), rect.height()))
                 self._remember_applied_screen_rect(each.screen, each)
                 each.set_activity(self._host_activity(each))
@@ -7615,7 +7621,7 @@ class OverlayShell(QObject):
             return
         old_origin = host.overlay.geometry().topLeft()
         plan = self._geometry_plan(host, multi=multi)
-        host.overlay.setGeometry(desktop)
+        host.overlay.set_desktop_geometry(desktop)
         host.set_bounds(QRect(0, 0, desktop.width(), desktop.height()))
         host.set_activity(self._activity_rects(multi=multi))
         # 单窗下每块屏在窗里的位置也是"已应用状态"，同样要刷新给下一次比例定标用。
